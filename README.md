@@ -4,13 +4,26 @@ Script auto farm untuk **FrostHollow RPG [Floor 1]** dengan UI **WindUI**.
 
 ## Load
 
-PC / mobile — tempel satu baris:
+**Recommended — selalu versi terbaru** (ambil commit terakhir, anti-cache):
+
+```lua
+local repo, file = "demuth666/frosthollow-farm", "frosthollow_farm.luau"
+local url = "https://raw.githubusercontent.com/" .. repo .. "/main/" .. file
+local ok, body = pcall(function() return game:HttpGet("https://api.github.com/repos/" .. repo .. "/commits/main") end)
+if ok and type(body) == "string" then
+    local sha = body:match('"sha"%s*:%s*"(.-)"')
+    if sha then url = "https://raw.githubusercontent.com/" .. repo .. "/" .. sha .. "/" .. file end
+end
+loadstring(game:HttpGet(url))()
+```
+
+Versi pendek (bisa telat beberapa menit setelah update karena cache GitHub):
 
 ```lua
 loadstring(game:HttpGet("https://raw.githubusercontent.com/demuth666/frosthollow-farm/main/frosthollow_farm.luau"))()
 ```
 
-Alternatif CDN (lebih cepat / kalau raw diblokir):
+CDN alternatif:
 
 ```lua
 loadstring(game:HttpGet("https://cdn.jsdelivr.net/gh/demuth666/frosthollow-farm@main/frosthollow_farm.luau"))()
