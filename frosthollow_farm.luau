@@ -34,6 +34,15 @@ end
 genObj.Value = genObj.Value + 1
 local MY_GEN = genObj.Value
 
+-- bersihkan window dari instance script sebelumnya (kalau re-run tanpa rejoin)
+do
+    local rg = CoreGui:FindFirstChild("RobloxGui")
+    local oldWin = rg and rg:FindFirstChild("WindUI")
+    if oldWin then
+        pcall(function() oldWin:Destroy() end)
+    end
+end
+
 -- ============================================================
 -- WindUI (jsDelivr + cache sumber, biar reload nggak nunggu GitHub)
 -- ============================================================
@@ -102,9 +111,14 @@ local C = {
     EspDistance = 400,
     -- parry
     AutoParry = true,
-    ParryLead = 0.28,
+    ParryLead = 0,          -- offset manual; 0 = auto pakai latency terukur
     ParryHold = 0.3,
     ParryRange = 16,
+    AutoDash = true,
+    DashHP = 45,
+    DashBoss = true,
+    BossSafe = true,
+    BossRetreatHP = 50,
 }
 
 local StatChoice = "Damage"
@@ -116,7 +130,9 @@ local PARRY_ATTACK_ACTIONS_EXCLUDED = {
 }
 local parry = {
     nextImpact = nil,     -- detik menuju impact serangan terdekat
-    impacts = {},         -- [nama mob] = waktu impact yang dipelajari
+    attacker = nil,       -- mob yang serangannya paling dekat
+    impact = {},          -- [mob|action] = waktu impact yang dipelajari
+    latency = nil,        -- latency terukur dari ParryWindowEnd
     lastTry = -999,
     blocking = false,
     busyUntil = 0,
@@ -125,8 +141,14 @@ local parry = {
     attempts = 0,
     successes = 0,
     lastSelfParryAt = nil,
+    lastAttempt = nil,
     seenParryAt = {},
 }
+
+-- Dipakai auto farm & defense (dideklarasikan di awal supaya bisa diakses farmStep)
+local VIM = game:GetService("VirtualInputManager")
+local dashReadyAt = 0
+local dashHoldUntil = 0
 
 -- ============================================================
 -- Helper umum
@@ -459,7 +481,16 @@ local function farmStep()
 
     -- HP rendah: kabur ke Town dan tunggu regen sampai aman
     local hpPct = (hum.Health / math.max(hum.MaxHealth, 1)) * 100
-    if hpPct <= C.RetreatHP then
+    local bossFight = false
+    if tracker.model and tracker.model.Parent then
+        local th = tracker.model:FindFirstChildOfClass("Humanoid")
+        bossFight = th ~= nil and th.Health > 0 and isBoss(tracker.model)
+    end
+    local retreatAt = C.RetreatHP
+    if bossFight and (C.BossRetreatHP or 0) > retreatAt then
+        retreatAt = C.BossRetreatHP
+    end
+    if hpPct <= retreatAt then
         retreating = true
     end
     if retreating then
@@ -529,7 +560,15 @@ local function farmStep()
     local myPos = hrp.Position
     local dir = Vector3.new(myPos.X - rootPos.X, 0, myPos.Z - rootPos.Z)
     if dir.Magnitude < 0.1 then dir = Vector3.new(0, 0, 1) end
-    local stand = rootPos + dir.Unit * 3.2
+    local stand
+    if target.boss then
+        -- boss: cari posisi di belakang biar serangan depan meleset
+        local look = Vector3.new(target.root.CFrame.LookVector.X, 0, target.root.CFrame.LookVector.Z)
+        if look.Magnitude < 0.1 then look = Vector3.new(0, 0, 1) else look = look.Unit end
+        stand = rootPos - look * 4.5
+    else
+        stand = rootPos + dir.Unit * 3.2
+    end
 
     if (myPos - stand).Magnitude > 7 or math.abs(myPos.Y - rootPos.Y) > 8 then
         hrp.CFrame = CFrame.lookAt(Vector3.new(stand.X, rootPos.Y + 3, stand.Z), rootPos)
@@ -538,9 +577,21 @@ local function farmStep()
         hrp.CFrame = CFrame.lookAt(myPos, Vector3.new(rootPos.X, myPos.Y, rootPos.Z))
     end
 
-    if C.AutoParry and parry.nextImpact and parry.nextImpact < 0.4 and parry.nextImpact > -0.15 then
+    if C.AutoParry and (parry.blocking or (parry.nextImpact and parry.nextImpact < 0.4 and parry.nextImpact > -0.15)) then
         -- tahan pukulan sebentar supaya block/parry bisa masuk
         task.wait(0.04)
+        return
+    end
+
+    if C.AutoDash and os.clock() < dashHoldUntil then
+        -- habis dash, jangan langsung teleport balik ke hitbox
+        task.wait(0.05)
+        return
+    end
+
+    if target.boss and C.BossSafe and parry.nextImpact and parry.nextImpact < 0.6 and parry.nextImpact > -0.2 then
+        -- serangan boss sudah dekat: berhenti mukul, biar parry/dash yang kerja
+        task.wait(0.06)
         return
     end
 
@@ -937,9 +988,72 @@ local function endBlock()
     parry.blocking = false
 end
 
+local function parryKey(info, action)
+    return info.name .. "|" .. tostring(action)
+end
+
+-- lead otomatis: latency remote + setengah parry window (0.17s)
+local function parryLead()
+    local lat = parry.latency or 0.1
+    return math.clamp(lat * 2 + 0.085 + C.ParryLead, 0.1, 0.6)
+end
+
+-- ukur latency remote sekali di awal (block kosong tidak makan guard)
+local function calibrateLatency()
+    task.spawn(function()
+        local samples = {}
+        for _ = 1, 3 do
+            local _, _, hum = getChar()
+            if not hum or hum.Health <= 0 then break end
+            local char = LP.Character
+            local s0 = Workspace:GetServerTimeNow()
+            pcall(function() Router:FireServer("RequestBlockStart") end)
+            task.wait(0.16)
+            local pwe = char:GetAttribute("ParryWindowEnd")
+            pcall(function() Router:FireServer("RequestBlockEnd") end)
+            if pwe and pwe > s0 then
+                local l = pwe - s0 - 0.17
+                if l >= 0 and l <= 0.35 then samples[#samples + 1] = l end
+            end
+            task.wait(0.9)
+        end
+        if #samples > 0 then
+            local sum = 0
+            for _, v in ipairs(samples) do sum = sum + v end
+            parry.latency = sum / #samples
+        end
+    end)
+end
+
+-- Dash pakai Q (mekanik asli game: stamina + cooldown 1.2s)
+local function doDash(hrp, attackerPos)
+    local char = LP.Character
+    if not (char and hrp) then return false end
+    if os.clock() < dashReadyAt then return false end
+    if char:GetAttribute("IsDashing") then return false end
+    if char:GetAttribute("Blocking") then endBlock() end
+    local away = Vector3.new(hrp.Position.X - attackerPos.X, 0, hrp.Position.Z - attackerPos.Z)
+    if away.Magnitude < 0.1 then away = hrp.CFrame.LookVector end
+    local side = hrp.CFrame.RightVector
+    local dir = (away.Unit + Vector3.new(side.X, 0, side.Z) * 0.4)
+    if dir.Magnitude < 0.1 then dir = away.Unit else dir = dir.Unit end
+    hrp.CFrame = CFrame.lookAt(hrp.Position, hrp.Position + dir)
+    dashReadyAt = os.clock() + 1.25
+    dashHoldUntil = os.clock() + 0.55
+    pcall(function()
+        VIM:SendKeyEvent(true, Enum.KeyCode.Q, false, game)
+        task.delay(0.06, function()
+            pcall(function() VIM:SendKeyEvent(false, Enum.KeyCode.Q, false, game) end)
+        end)
+    end)
+    hudState.state = "DASH"
+    return true
+end
+
 local function refreshParry(hrp, hum)
     local sNow = Workspace:GetServerTimeNow()
     parry.nextImpact = nil
+    parry.attacker = nil
     local nearestCulprit, nearestDist = nil, math.huge
 
     for _, info in ipairs(mobList()) do
@@ -947,28 +1061,30 @@ local function refreshParry(hrp, hum)
         if dist <= C.ParryRange then
             local action = info.model:GetAttribute("Action")
             if action and not PARRY_ATTACK_ACTIONS_EXCLUDED[action] then
+                local key = parryKey(info, action)
                 local elapsed = sNow - (info.model:GetAttribute("ActionAt") or 0)
-                local impact = parry.impacts[info.name] or 0.6
+                -- boss umumnya windup lebih lama; default impact lebih besar
+                local impact = parry.impact[key] or (info.boss and 1.05 or 0.62)
                 local untilImpact = impact - elapsed
-                if untilImpact > -0.2 and untilImpact < 1.2 then
+                if untilImpact > -0.35 and untilImpact < 1.6 then
                     if not parry.nextImpact or untilImpact < parry.nextImpact then
                         parry.nextImpact = untilImpact
+                        parry.attacker = { info = info, elapsed = elapsed, key = key, untilImpact = untilImpact }
                     end
                     if elapsed > 0.05 and dist < nearestDist then
-                        nearestCulprit, nearestDist = { info = info, elapsed = elapsed }, dist
+                        nearestCulprit, nearestDist = { info = info, elapsed = elapsed, key = key }, dist
                     end
                 end
             end
         end
     end
 
-    -- belajar timing impact mob dari HP yang berkurang
+    -- belajar timing impact per mob+serangan dari HP yang turun
     if parry.lastHP and hum.Health < parry.lastHP and nearestCulprit then
-        local name = nearestCulprit.info.name
         local e = nearestCulprit.elapsed
         if e > 0.1 and e < 2.5 then
-            local old = parry.impacts[name]
-            parry.impacts[name] = old and (old * 0.6 + e * 0.4) or e
+            local old = parry.impact[nearestCulprit.key] or parry.impact[nearestCulprit.info.name]
+            parry.impact[nearestCulprit.key] = old and (old * 0.6 + e * 0.4) or e
         end
     end
     parry.lastHP = hum.Health
@@ -976,7 +1092,7 @@ end
 
 RunService.Heartbeat:Connect(function()
     if genObj.Value ~= MY_GEN then return end
-    if not C.AutoParry then
+    if not (C.AutoParry or C.AutoDash) then
         if parry.blocking then endBlock() end
         return
     end
@@ -993,12 +1109,46 @@ RunService.Heartbeat:Connect(function()
         parry.lastSelfParryAt = pa
         if math.abs(Workspace:GetServerTimeNow() - pa) < 1.5 then
             parry.successes = parry.successes + 1
+            local att = parry.lastAttempt
+            if att and now - att.at < 0.9 then att.success = true end
         end
     end
 
-    if now - parry.scanAt >= 0.1 then
+    if now - parry.scanAt >= 0.06 then
         parry.scanAt = now
         refreshParry(hrp, hum)
+    end
+
+    -- ukur latency remote dari ParryWindowEnd yang diset server
+    local att = parry.lastAttempt
+    if att and not att.measured and now - att.at >= 0.2 then
+        att.measured = true
+        local pwe = char:GetAttribute("ParryWindowEnd")
+        if pwe and att.firedAt and pwe > att.firedAt then
+            local l = pwe - att.firedAt - 0.17
+            if l >= 0 and l <= 0.35 then
+                parry.latency = parry.latency and (parry.latency * 0.7 + l * 0.3) or l
+            end
+        end
+    end
+
+    local ni = parry.nextImpact
+
+    -- Auto Dash: hindari serangan boss / saat HP rendah
+    if C.AutoDash and ni and ni <= 0.32 and ni >= -0.3 and parry.attacker then
+        local hpPct = (hum.Health / math.max(hum.MaxHealth, 1)) * 100
+        local wantDash = (C.DashBoss and parry.attacker.info.boss) or hpPct <= C.DashHP
+        if wantDash and not char:GetAttribute("IsDashing") then
+            if parry.blocking then endBlock() end
+            if doDash(hrp, parry.attacker.info.root.Position) then
+                return
+            end
+        end
+    end
+
+    if not C.AutoParry then
+        if parry.blocking then endBlock() end
+        return
     end
 
     if parry.blocking then
@@ -1010,14 +1160,26 @@ RunService.Heartbeat:Connect(function()
 
     -- ParryCooldown game = 0.8s, BlockCooldown = 0.35s
     if now - parry.lastTry < 0.8 then return end
-    local ni = parry.nextImpact
-    if ni and ni <= C.ParryLead and ni >= -0.1 then
-        parry.blocking = true
-        parry.busyUntil = now + C.ParryHold
-        parry.lastTry = now
-        parry.attempts = parry.attempts + 1
-        char:SetAttribute("Blocking", true)
-        pcall(function() Router:FireServer("RequestBlockStart") end)
+    if ni and parry.attacker then
+        local key = parry.attacker.key
+        if ni <= parryLead() and ni >= -0.1 then
+            parry.blocking = true
+            local boss = parry.attacker.info.boss
+            -- boss: tahan block melewati impact (mitigasi), karena timing
+            -- windup boss susah ditebak. Mob biasa juga sama.
+            parry.busyUntil = now + math.max(0.3, ni + (boss and 0.5 or 0.25))
+            parry.lastTry = now
+            parry.attempts = parry.attempts + 1
+            parry.lastAttempt = {
+                key = key,
+                at = now,
+                success = false,
+                holdUntil = parry.busyUntil,
+                firedAt = Workspace:GetServerTimeNow(),
+            }
+            char:SetAttribute("Blocking", true)
+            pcall(function() Router:FireServer("RequestBlockStart") end)
+        end
     end
 end)
 
@@ -1236,15 +1398,16 @@ ParryTab:Toggle({
         C.AutoParry = v
         if not v then endBlock() end
         parry.lastSelfParryAt = nil
+        if v and not parry.latency then calibrateLatency() end
         notify("Auto Parry", v and "Aktif" or "Nonaktif", "shield")
     end,
 })
 
 ParryTab:Slider({
-    Title = "Parry Lead (detik)",
-    Desc = "Mulai block sekian detik sebelum impact",
+    Title = "Offset Parry (0 = auto)",
+    Desc = "Auto pakai latency terukur. Geser kalau masih sering meleset",
     Step = 0.01,
-    Value = { Min = 0.05, Max = 0.45, Default = 0.28 },
+    Value = { Min = -0.15, Max = 0.25, Default = 0 },
     Callback = function(v) C.ParryLead = v end,
 })
 
@@ -1263,12 +1426,63 @@ ParryTab:Slider({
     Callback = function(v) C.ParryRange = v end,
 })
 
+ParryTab:Toggle({
+    Title = "Auto Dash (Q)",
+    Desc = "Dodge pakai dash asli game (stamina + cooldown)",
+    Value = true,
+    Callback = function(v)
+        C.AutoDash = v
+        notify("Auto Dash", v and "Aktif" or "Nonaktif", "wind")
+    end,
+})
+
+ParryTab:Slider({
+    Title = "Dash kalau HP di bawah (%)",
+    Step = 5,
+    Value = { Min = 10, Max = 90, Default = 45 },
+    Callback = function(v) C.DashHP = v end,
+})
+
+ParryTab:Toggle({
+    Title = "Dash untuk serangan Boss",
+    Desc = "Selalu dash saat boss menyerang, walau HP masih penuh",
+    Value = true,
+    Callback = function(v) C.DashBoss = v end,
+})
+
+ParryTab:Toggle({
+    Title = "Boss Safe Mode",
+    Desc = "Saat boss windup/serang, berhenti memukul (biar parry/dash kerja)",
+    Value = true,
+    Callback = function(v) C.BossSafe = v end,
+})
+
+ParryTab:Slider({
+    Title = "Kabur dari Boss kalau HP (%)",
+    Step = 5,
+    Value = { Min = 10, Max = 90, Default = 50 },
+    Callback = function(v) C.BossRetreatHP = v end,
+})
+
+ParryTab:Button({
+    Title = "Kalibrasi Latency",
+    Desc = "Ukur ulang latency remote buat timing parry",
+    Icon = "gauge",
+    Callback = function()
+        parry.latency = nil
+        calibrateLatency()
+        notify("Auto Parry", "Kalibrasi latency...", "gauge")
+    end,
+})
+
 ParryTab:Button({
     Title = "Reset Timing Belajar",
-    Desc = "Hapus data impact mob yang sudah dipelajari",
+    Desc = "Hapus data impact + lead adaptif yang sudah dipelajari",
     Icon = "rotate-ccw",
     Callback = function()
-        parry.impacts = {}
+        parry.impact = {}
+        parry.latency = nil
+        parry.lastAttempt = nil
         notify("Auto Parry", "Timing mob di-reset", "rotate-ccw")
     end,
 })
@@ -1540,6 +1754,11 @@ InfoSec:Paragraph({
 })
 
 InfoSec:Paragraph({
+    Title = "Boss",
+    Desc = "Untuk boss: nyalakan 'Ikut Serang Boss/King', biarkan Boss Safe Mode + Auto Dash ON. Saat boss windup, script berhenti mukul, parry kalau timing pas, atau dash menjauh kalau HP di bawah batas / lawan boss. Kalau HP tembus Boss Retreat HP, script kabur ke Town dan nunggu regen.",
+})
+
+InfoSec:Paragraph({
     Title = "Peringatan",
     Desc = "Speed di atas ~60 dan fly bisa terlihat mencurigakan. Gunakan wajar. Script ini client-side; damage tetap dihitung server lewat Tool:Activate().",
 })
@@ -1569,6 +1788,7 @@ end)
 
 setAntiAFK(C.AntiAFK)
 if C.AutoLoot then startLoot() end
+if C.AutoParry then calibrateLatency() end
 
 -- Akses cepat buat debug / dipanggil manual dari console
 genv.FrostHollowFarm = {
@@ -1612,6 +1832,7 @@ if STATE and STATE.onCleanup then
         C.AutoMine = false
         C.AutoStat = false
         C.AutoParry = false
+        C.AutoDash = false
         pcall(endBlock)
         clearEsp()
         stopFly()

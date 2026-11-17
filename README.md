@@ -34,7 +34,7 @@ loadstring(game:HttpGet("https://cdn.jsdelivr.net/gh/demuth666/frosthollow-farm@
 | Tab | Fitur |
 |---|---|
 | **Farm** | Auto Farm (teleport + serang), Kill Aura, Auto Loot, Auto Revive, Auto Mine (butuh Pickaxe), **filter Target Mob** (pilih jenis mob: Slime, Wolf, Golem, dll), prioritas target, filter level min/max, jeda pukulan, auto kabur saat HP rendah, teleport ke mob terdekat |
-| **Farm → Defense** | **Auto Parry** — block tepat sebelum impact, belajar timing tiap jenis mob otomatis, slider lead/hold/jarak, reset timing |
+| **Farm → Defense** | **Auto Parry** (latency auto-calibration + belajar timing per mob/serangan), **Auto Dash (Q)** — dodge pakai dash asli game, **Boss Safe Mode** (berhenti mukul saat impact boss dekat), kabur dari boss kalau HP rendah, serang boss dari belakang |
 | **Teleport** | 8 waypoint (Town, Harbor, Temple, Mine, Highlands, Summit, Forest, MineLake), Quest Target, Crystal terdekat, Loot terdekat |
 | **Movement** | Speed Hack, Jump Boost, Fly, Noclip, Infinite Jump, Anti-AFK |
 | **Visuals** | ESP Mobs (nama/Lv/HP/jarak), ESP Loot, ESP Crystal, ESP Players, jarak maksimal |
@@ -66,7 +66,9 @@ Jika ada mob baru, tekan **Refresh Daftar Mob** di tab Farm → Target.
 ## Teknis
 
 - Damage tetap dihitung server: script memanggil `Tool:Activate()` saat menempel di mob.
-- Parry memakai `RequestBlockStart` / `RequestBlockEnd` + prediksi impact dari attribute `Action` / `ActionAt` mob.
+- **Auto Parry**: saat block dimulai, server menulis `ParryWindowEnd`; script memakai selisihnya untuk mengukur latency remote (~0.1s) dan menaruh block tepat di tengah parry window (0.17s). Timing impact dipelajari per `mob|serangan`, jadi mob baru butuh 1-2 hit untuk akurat.
+- **Auto Dash**: mengirim key `Q` lewat VirtualInputManager — memakai dash asli game (stamina 8, cooldown 1.2s). Arah dash menjauh dari penyerang + sedikit menyamping.
+- **Boss**: posisi di belakang boss, block ditahan melewati impact (mitigasi kalau window parry meleset), dan dash dipakai saat HP di bawah batas / lawan boss. Parry boss lebih sulit karena windup-nya panjang dan bervariasi — dash + block yang bikin selamat.
 - Loot diambil lewat `ProximityPrompt:InputHoldBegin()`.
 - Revive lewat `RequestRespawn`.
 
