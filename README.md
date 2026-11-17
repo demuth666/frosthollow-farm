@@ -20,7 +20,7 @@ loadstring(game:HttpGet("https://cdn.jsdelivr.net/gh/demuth666/frosthollow-farm@
 
 | Tab | Fitur |
 |---|---|
-| **Farm** | Auto Farm (teleport + serang), Kill Aura, Auto Loot, Auto Revive, Auto Mine (butuh Pickaxe), prioritas target, filter level min/max, jeda pukulan, auto kabur saat HP rendah, teleport ke mob terdekat |
+| **Farm** | Auto Farm (teleport + serang), Kill Aura, Auto Loot, Auto Revive, Auto Mine (butuh Pickaxe), **filter Target Mob** (pilih jenis mob: Slime, Wolf, Golem, dll), prioritas target, filter level min/max, jeda pukulan, auto kabur saat HP rendah, teleport ke mob terdekat |
 | **Farm → Defense** | **Auto Parry** — block tepat sebelum impact, belajar timing tiap jenis mob otomatis, slider lead/hold/jarak, reset timing |
 | **Teleport** | 8 waypoint (Town, Harbor, Temple, Mine, Highlands, Summit, Forest, MineLake), Quest Target, Crystal terdekat, Loot terdekat |
 | **Movement** | Speed Hack, Jump Boost, Fly, Noclip, Infinite Jump, Anti-AFK |
@@ -33,7 +33,14 @@ loadstring(game:HttpGet("https://cdn.jsdelivr.net/gh/demuth666/frosthollow-farm@
 2. Jalankan loader di atas.
 3. Buka menu: **RightShift** (PC) atau tombol melayang **FrostHollow** (mobile).
 4. Nyalakan **Auto Farm**. Atur **Level Maksimum** (0 = level kamu + 2).
-5. **Auto Parry** dan **Auto Loot** sudah aktif secara default.
+5. **Target Mob**: pilih satu/lebih jenis mob yang mau dibunuh (Slime, Wolf, Golem, Bandit, dll). Kosongkan = semua jenis.
+6. **Auto Parry** dan **Auto Loot** sudah aktif secara default.
+
+### Daftar mob
+
+Slime, King Slime, Shard Slime, Wolf, King Wolf, Polar Bear, King Polar Bear, Golem, King Golem, Spider, King Spider, Egg Guardian Spider, Goblin, Goblin Chief, Bandit, Bandit Chief, Skeleton Miner.
+
+Jika ada mob baru, tekan **Refresh Daftar Mob** di tab Farm → Target.
 
 ## Catatan mobile
 

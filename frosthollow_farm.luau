@@ -83,6 +83,7 @@ local C = {
     RetreatHP = 20,
     ResumeHP = 65,
     LootRange = 120,
+    MobFilter = {},
     -- movement
     SpeedHack = false,
     Speed = 30,
@@ -257,6 +258,79 @@ local function levelCap()
     return playerLevel() + 2
 end
 
+-- ============================================================
+-- Nama mob (EN) + filter target
+-- ============================================================
+local MOB_EN = {
+    ["슬라임"] = "Slime",
+    ["대왕 슬라임"] = "King Slime",
+    ["파편 슬라임"] = "Shard Slime",
+    ["늑대"] = "Wolf",
+    ["대왕 늑대"] = "King Wolf",
+    ["북극곰"] = "Polar Bear",
+    ["대왕 북극곰"] = "King Polar Bear",
+    ["골렘"] = "Golem",
+    ["대왕 골렘"] = "King Golem",
+    ["거미"] = "Spider",
+    ["대왕 거미"] = "King Spider",
+    ["거미 알집 수호충"] = "Egg Guardian Spider",
+    ["고블린"] = "Goblin",
+    ["고블린 족장"] = "Goblin Chief",
+    ["도적"] = "Bandit",
+    ["도적 두목"] = "Bandit Chief",
+    ["해골 광부"] = "Skeleton Miner",
+}
+
+local function mobLabel(name)
+    local en = MOB_EN[name]
+    if en then return en .. " (" .. name .. ")" end
+    return name
+end
+
+local function buildMobOptions()
+    local seen, names = {}, {}
+    local folder = ReplicatedStorage:FindFirstChild("Mobs")
+    if folder then
+        for _, m in ipairs(folder:GetChildren()) do
+            if not seen[m.Name] then
+                seen[m.Name] = true
+                names[#names + 1] = m.Name
+            end
+        end
+    end
+    local ents = Workspace:FindFirstChild("Entities")
+    if ents then
+        for _, m in ipairs(ents:GetChildren()) do
+            if m:FindFirstChildOfClass("Humanoid") then
+                local n = m:GetAttribute("DisplayName") or m.Name
+                if not seen[n] then
+                    seen[n] = true
+                    names[#names + 1] = n
+                end
+            end
+        end
+    end
+    local sorted = {}
+    for _, n in ipairs(names) do
+        sorted[#sorted + 1] = { label = mobLabel(n), key = MOB_EN[n] or n }
+    end
+    table.sort(sorted, function(a, b) return a.key < b.key end)
+    local labels, nameOf = {}, {}
+    for _, e in ipairs(sorted) do
+        labels[#labels + 1] = e.label
+    end
+    for _, n in ipairs(names) do
+        nameOf[mobLabel(n)] = n
+    end
+    return labels, nameOf
+end
+
+local function mobPass(info)
+    if not C.MobFilter then return true end
+    if next(C.MobFilter) == nil then return true end
+    return C.MobFilter[info.name] == true or C.MobFilter[info.model.Name] == true
+end
+
 local function pickTarget(hrp)
     local cap = levelCap()
     local now = os.clock()
@@ -267,6 +341,7 @@ local function pickTarget(hrp)
             and info.lvl <= cap
             and (C.IncludeBosses or not info.boss)
             and (not badUntil or badUntil < now)
+            and mobPass(info)
         if ok then
             local d = (info.root.Position - hrp.Position).Magnitude
             if d <= C.MaxChase then
@@ -499,7 +574,7 @@ local function auraStep()
     local cap = levelCap()
     local nearest, nd
     for _, info in ipairs(mobList()) do
-        if info.lvl >= C.MinLevel and info.lvl <= cap and (C.IncludeBosses or not info.boss) then
+        if info.lvl >= C.MinLevel and info.lvl <= cap and (C.IncludeBosses or not info.boss) and mobPass(info) then
             local d = (info.root.Position - hrp.Position).Magnitude
             if d <= 10 and (not nd or d < nd) then nearest, nd = info, d end
         end
@@ -1048,6 +1123,44 @@ FarmTarget:Toggle({
     Callback = function(v) C.IncludeBosses = v end,
 })
 
+local mobLabels, mobNameOf = buildMobOptions()
+
+local mobDropdown = FarmTarget:Dropdown({
+    Title = "Target Mob (kosong = semua)",
+    Desc = "Pilih satu / lebih jenis mob yang mau dibunuh",
+    Values = mobLabels,
+    Multi = true,
+    AllowNone = true,
+    Callback = function(selected)
+        local set = {}
+        if type(selected) == "table" then
+            for _, lbl in ipairs(selected) do
+                local n = mobNameOf[lbl]
+                if n then set[n] = true end
+            end
+        elseif type(selected) == "string" then
+            local n = mobNameOf[selected]
+            if n then set[n] = true end
+        end
+        C.MobFilter = set
+        local count = 0
+        for _ in pairs(set) do count = count + 1 end
+        notify("Target Mob", count == 0 and "Semua jenis mob" or (count .. " jenis mob dipilih"), "crosshair")
+    end,
+})
+
+FarmTarget:Button({
+    Title = "Refresh Daftar Mob",
+    Desc = "Scan ulang jenis mob yang ada di game",
+    Icon = "refresh-cw",
+    Callback = function()
+        local labels, nameOf = buildMobOptions()
+        mobLabels, mobNameOf = labels, nameOf
+        pcall(function() mobDropdown:Refresh(labels) end)
+        notify("Target Mob", #labels .. " jenis mob ditemukan", "crosshair")
+    end,
+})
+
 FarmTarget:Slider({
     Title = "Level Minimum",
     Step = 1,
@@ -1101,10 +1214,12 @@ FarmTab:Button({
         if not hrp then return notify("Teleport", "Karakter belum hidup", "alert-triangle") end
         local best, bd
         for _, info in ipairs(mobList()) do
-            local d = (info.root.Position - hrp.Position).Magnitude
-            if not bd or d < bd then best, bd = info, d end
+            if mobPass(info) then
+                local d = (info.root.Position - hrp.Position).Magnitude
+                if not bd or d < bd then best, bd = info, d end
+            end
         end
-        if not best then return notify("Teleport", "Tidak ada mob", "alert-triangle") end
+        if not best then return notify("Teleport", "Tidak ada mob yang cocok", "alert-triangle") end
         teleportTo(best.root.Position + Vector3.new(0, 3, 4))
         notify("Teleport", string.format("%s Lv.%d (%dm)", best.name, best.lvl, bd), "map-pin")
     end,
@@ -1421,7 +1536,7 @@ local InfoSec = MiscTab:Section({ Title = "Info", Box = true, BoxBorder = true }
 
 InfoSec:Paragraph({
     Title = "Cara Pakai",
-    Desc = "1) Aktifkan Auto Farm. 2) Atur Level Maks (0 = level kamu +2). 3) Biarkan script teleport & mukul. 4) Auto Loot nyalakan biar drop ikut diambil. 5) Auto Parry di tab Farm > Defense. Tekan RightShift untuk buka/tutup menu.",
+    Desc = "1) Aktifkan Auto Farm. 2) Atur Level Maks (0 = level kamu +2). 3) Pilih Target Mob kalau cuma mau jenis tertentu (kosong = semua). 4) Biarkan script teleport & mukul. 5) Auto Loot / Auto Parry ada di tab Farm. Tekan RightShift untuk buka/tutup menu.",
 })
 
 InfoSec:Paragraph({
@@ -1469,6 +1584,7 @@ genv.FrostHollowFarm = {
     SetAntiAFK = setAntiAFK,
     Notify = notify,
     Parry = parry,
+    Hud = hudState,
 }
 
 LP.CharacterAdded:Connect(function(char)
